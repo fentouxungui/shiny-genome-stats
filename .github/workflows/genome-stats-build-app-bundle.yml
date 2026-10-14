@@ -68,6 +68,8 @@ env:
   SOURCE_REBUILD: ""
   APP_NOTES: "ui.R/server.R/global.R plus example data, copied verbatim."
   MAX_REQUEST_MB: "1024"
+  SMOKE: "on"
+  SMOKE_TIMEOUT_SEC: "300"
   R_VERSION: "4.6.1"
 
 jobs:
@@ -89,7 +91,7 @@ jobs:
 
       - name: Install build helpers
         shell: bash
-        run: Rscript -e 'install.packages(c("jsonlite","zip","digest","BiocManager"), repos="https://cloud.r-project.org")'
+        run: Rscript -e 'install.packages(c("jsonlite","zip","digest","BiocManager","callr","curl"), repos="https://cloud.r-project.org")'
 
       - name: Resolve store version
         shell: bash
@@ -175,6 +177,8 @@ jobs:
           er <- split_pkgs(Sys.getenv("EXTRA_REPOS"))
           repos <- unique(c(er, BiocManager::repositories())); options(repos = repos)
           db <- available.packages(repos = repos, type = "source")
+          dropped <- setdiff(seed, rownames(db)); if (length(dropped)) cat("WARN dropped (not in CRAN/Bioc):", paste(dropped, collapse = ", "), "\n")
+          seed <- intersect(seed, rownames(db))
           closure <- unique(c(seed, unlist(tools::package_dependencies(seed, db = db, recursive = TRUE))))
           closure <- setdiff(closure, base_pkgs); closure <- intersect(closure, rownames(db))
           cat("closure size:", length(closure), "\n")
@@ -244,6 +248,44 @@ jobs:
           if (sz > 2 * 1024^3) stop("bundle exceeds the 2 GiB GitHub Release asset limit; trim modules or use a smaller closure.")
           writeLines(sprintf('{"platform":"%s","file":"%s","sha256":"%s","size":%d}', "${{ matrix.platform }}", out, sha, sz),
                      sprintf("meta-%s.json", "${{ matrix.platform }}"))
+
+      - name: Smoke test (launch the bundle like the ShinyApps shell)
+        if: ${{ env.SMOKE != 'off' }}
+        timeout-minutes: 12
+        shell: Rscript {0}
+        run: |
+          # Reproduce the ShinyApps shell's startup: put the bundle's rlib on .libPaths and
+          # load the app from its own directory. Runs in a child process with a hard timeout so
+          # it can never hang, and surfaces the exact R error if the app fails to start.
+          app_id <- Sys.getenv("APP_ID"); ver <- Sys.getenv("VERSION"); plat <- "${{ matrix.platform }}"
+          zip <- sprintf("%s-%s-%s.zip", app_id, ver, plat)
+          if (!file.exists(zip)) stop("smoke: bundle not found: ", zip)
+          tmp <- tempfile("smoke"); dir.create(tmp)
+          utils::unzip(zip, exdir = tmp)
+          appdir <- file.path(tmp, "app"); lib <- file.path(tmp, "rlib")
+          if (!dir.exists(appdir) || !dir.exists(lib)) stop("smoke: unexpected bundle layout")
+          timeout <- suppressWarnings(as.integer(Sys.getenv("SMOKE_TIMEOUT_SEC", "300"))); if (is.na(timeout) || timeout < 30) timeout <- 300
+          cat(sprintf("smoke: loading app '%s' (rlib on .libPaths)\n", app_id))
+          load_app <- function(appdir, lib) {
+            .libPaths(c(lib, .libPaths()))
+            old <- setwd(appdir); on.exit(setwd(old), add = TRUE)
+            if (file.exists("app.R")) {
+              obj <- source("app.R")$value
+              if (!inherits(obj, "shiny.appobj")) stop("app.R did not return a shiny app object")
+            } else if (file.exists("ui.R") && file.exists("server.R")) {
+              if (file.exists("global.R")) source("global.R")
+              source("ui.R"); source("server.R")
+              obj <- shiny::shinyApp(ui, server)
+            } else stop("no app.R and no ui.R/server.R")
+            invisible(TRUE)
+          }
+          res <- tryCatch(callr::r(load_app, args = list(appdir = appdir, lib = lib), timeout = timeout, show = TRUE),
+                          error = function(e) e)
+          if (inherits(res, "error")) {
+            cat("\n---- smoke error ----\n"); cat(conditionMessage(res), "\n")
+            stop("smoke test FAILED: the app did not start: ", conditionMessage(res))
+          }
+          cat("SMOKE OK\n")
 
       - uses: actions/upload-artifact@v4
         with:
