@@ -87,7 +87,7 @@ jobs:
       - name: Install R deps for the generators
         shell: bash
         run: |
-          Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org"); install.packages(c("jsonlite","tidyverse","argparse"), repos="https://cloud.r-project.org"); BiocManager::install(c("Biostrings","rtracklayer"), update=FALSE, ask=FALSE)'
+          Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager"); install.packages(c("jsonlite","tidyverse","argparse")); BiocManager::install(c("Biostrings","rtracklayer"), update=FALSE, ask=FALSE)'
       - name: Install NCBI datasets CLI
         shell: bash
         run: |
@@ -131,7 +131,7 @@ jobs:
 
       - name: Install build helpers
         shell: bash
-        run: Rscript -e 'install.packages(c("jsonlite","zip","digest","BiocManager","callr","curl"), repos="https://cloud.r-project.org")'
+        run: Rscript -e 'install.packages(c("jsonlite","zip","digest","BiocManager","callr","curl"))'
 
       - name: Resolve store version
         shell: bash
