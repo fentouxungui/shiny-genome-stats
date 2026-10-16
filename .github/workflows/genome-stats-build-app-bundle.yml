@@ -60,21 +60,60 @@ env:
   DEMO_OBJECT: ""
   DEMO_SAVE_AS: ""
   DEMO_RDATA: ""
-  EXTRA_PKGS: "jsonlite,tidyverse,Biostrings,rtracklayer,argparse"
+  EXTRA_PKGS: ""
   EXCLUDE: ".github"
   ARCHIVE_URLS: ""
   EXTRA_REPOS: ""
   SOFT_PKGS: ""
   SOURCE_REBUILD: ""
-  PREFETCH_SCRIPT: "scripts/shinyapps-prefetch.R"
-  APP_NOTES: "Data tables are generated at build time from NCBI (datasets CLI)."
+  PREFETCH_SCRIPT: ""
+  APP_NOTES: "Genome summary tables are generated at build time from NCBI (datasets CLI) in a separate job."
   MAX_REQUEST_MB: "1024"
   SMOKE: "on"
   SMOKE_TIMEOUT_SEC: "300"
   R_VERSION: "4.6.1"
 
 jobs:
+  prefetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ env.R_VERSION }}
+          use-public-rspm: true
+      - name: Install R deps for the generators
+        shell: bash
+        run: |
+          Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org"); install.packages(c("jsonlite","tidyverse","argparse"), repos="https://cloud.r-project.org"); BiocManager::install(c("Biostrings","rtracklayer"), update=FALSE, ask=FALSE)'
+      - name: Install NCBI datasets CLI
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cli"
+          curl -sSL -o "$RUNNER_TEMP/cli/datasets" https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets
+          chmod +x "$RUNNER_TEMP/cli/datasets"
+          echo "$RUNNER_TEMP/cli" >> "$GITHUB_PATH"
+      - name: Generate genome data tables
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          Rscript scripts/prefetch_genomes.R
+          Rscript scripts/gene_wise_stats.R
+      - uses: actions/upload-artifact@v4
+        with:
+          name: genome-data
+          path: |
+            data/genome_summary.tsv
+            data/genome_features.tsv
+            data/genome_sequences.tsv
+            data/gene_wise_cds_width_distribution.tsv
+            data/gene_wise_start_codon_frequency.tsv
+            data/gene_wise_stop_codon_frequency.tsv
+            data/gene_wise_codon_bias.tsv
   bundle:
+    needs: prefetch
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -234,36 +273,17 @@ jobs:
             packages = lapply(seq_len(nrow(pkgs)), function(i) list(name = pkgs$Package[i], version = pkgs$Version[i], path = file.path("rlib", pkgs$Package[i]), source = "cran")))
           jsonlite::write_json(man, file.path(bundle, "manifest.json"), pretty = TRUE, auto_unbox = TRUE)
 
-      - name: Install NCBI datasets CLI
+      - uses: actions/download-artifact@v4
+        with:
+          name: genome-data
+          path: genome-data
+
+      - name: Inject generated genome data into the bundle
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/cli"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            curl -sSL -o "$RUNNER_TEMP/cli/datasets.exe" https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/win64/datasets.exe
-          else
-            curl -sSL -o "$RUNNER_TEMP/cli/datasets" https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/mac/datasets
-            chmod +x "$RUNNER_TEMP/cli/datasets"
-          fi
-          echo "$RUNNER_TEMP/cli" >> "$GITHUB_PATH"
-      - name: Prefetch first-launch data (optional)
-        if: ${{ env.PREFETCH_SCRIPT != '' }}
-        timeout-minutes: 45
-        shell: Rscript {0}
-        run: |
-          # Run a repo-provided R script from inside the bundled app directory, with the
-          # bundle's rlib on .libPaths(), so an app that downloads a database at first launch
-          # generates it here and ships it (the app then finds it and never downloads). The
-          # script must write into the current directory (e.g. data/<db>) and be idempotent.
-          root   <- getwd()
-          script <- file.path(root, Sys.getenv("PREFETCH_SCRIPT"))
-          if (!file.exists(script)) stop("PREFETCH_SCRIPT not found: ", script)
-          appdir <- file.path(root, "bundle", "app")
-          .libPaths(c(file.path(root, "bundle", "rlib"), .libPaths()))
-          options(timeout = 3600)
-          old <- setwd(appdir); on.exit(setwd(old), add = TRUE)
-          source(script)
-          cat("prefetch done; files under the app dir:\n")
-          print(list.files(".", recursive = TRUE, pattern = "[.](txt|tsv|rds|rda|sqlite)$"))
+          mkdir -p bundle/app/data
+          find genome-data -name "*.tsv" -exec cp {} bundle/app/data/ \;
+          ls -l bundle/app/data
       - name: Zip + sha256 + size guard
         shell: Rscript {0}
         run: |
